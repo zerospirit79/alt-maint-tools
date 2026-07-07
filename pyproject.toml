@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alt-maint-tools"
-version = "0.1.0"
+version = "0.1.1"
 description = "Utilities for ALT Linux package maintainers"
 readme = "README.md"
 license = { text = "MIT" }

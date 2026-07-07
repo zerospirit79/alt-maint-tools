@@ -1,11 +1,9 @@
 %define _unpackaged_files_terminate_build 1
 %define mod_name alt_maint_tools
-
-# cargo vendor встроен в cargo в Sisyphus; для p10/p11 собирать с -with cargo_vendor
-%def_without cargo_vendor
+%def_with check
 
 Name: alt-maint-tools
-Version: 0.1.0
+Version: 0.1.1
 Release: alt1
 Summary: Utilities for ALT Linux package maintainers
 Summary(ru_RU): Утилиты для мейнтейнеров пакетов ALT Linux
@@ -20,10 +18,12 @@ Source: %name-%version.tar
 BuildRequires(pre): rpm-build-pyproject
 BuildRequires: python3(setuptools)
 BuildRequires: python3(wheel)
+BuildRequires: python3(requests)
 
 Requires: python3 >= 3.9
 Requires: python3-base
 Requires: python3-module-requests
+
 
 # Optional runtime tools for alt-vendor-export (checked per project type)
 Requires: golang
@@ -74,5 +74,5 @@ Python-пакетов с PyPI, сравнение версий между вет
 %python3_sitelibdir/%{pyproject_distinfo %mod_name}/
 
 %changelog
-* Tue Jul 07 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.0-alt1
+* Tue Jul 07 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.1-alt1
 - Initial build for Sisyphus.
