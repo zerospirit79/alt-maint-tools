@@ -28,7 +28,7 @@ Requires: rust
 Requires: ruby
 Requires: node
 Requires: npm
-Requires: rubygem-bundler
+Requires: gem-bundler
 
 # cargo vendor is built into cargo in Sisyphus; stable branches may need it separately
 %if "%branch" != "sisyphus"
