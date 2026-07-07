@@ -1,5 +1,7 @@
 """Tests for PyPI vs Sisyphus version comparison."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock
 
 import pytest

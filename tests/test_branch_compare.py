@@ -1,5 +1,7 @@
 """Tests for branch version comparison."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock
 
 from alt_maint_tools import branch_compare
