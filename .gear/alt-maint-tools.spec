@@ -1,6 +1,9 @@
 %define _unpackaged_files_terminate_build 1
 %define mod_name alt_maint_tools
 
+# cargo vendor встроен в cargo в Sisyphus; для p10/p11 собирать с -with cargo_vendor
+%def_without cargo_vendor
+
 Name: alt-maint-tools
 Version: 0.1.0
 Release: alt1
@@ -30,8 +33,8 @@ Requires: node
 Requires: npm
 Requires: gem-bundler
 
-# cargo vendor is built into cargo in Sisyphus; stable branches may need it separately
-%if "%branch" != "sisyphus"
+# cargo vendor is built into cargo in Sisyphus; enable with -with cargo_vendor on stable branches
+%if_with cargo_vendor
 Requires: cargo-vendor
 %endif
 

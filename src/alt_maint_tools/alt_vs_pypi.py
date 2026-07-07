@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from dataclasses import dataclass
 from typing import Literal
 
 import requests
+from alt_maint_tools import __version__
 
 ALT_API_TEMPLATE = (
     "https://rdb.altlinux.org/api/site/maintainer_packages"
@@ -136,13 +138,28 @@ def format_table(rows: list[PackageRow]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = argv if argv is not None else sys.argv[1:]
-    if not args:
-        print("Использование: alt-vs-pypi <ник_мейнтейнера>")
-        return 1
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="alt-vs-pypi",
+        description=(
+            "Сверка версий Python-пакетов мейнтейнера в Sisyphus "
+            "с актуальными версиями на PyPI."
+        ),
+    )
+    parser.add_argument("maintainer", help="Ник мейнтейнера в ALT Linux")
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    return parser
 
-    rows = collect_results(args[0])
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    rows = collect_results(args.maintainer)
     print(format_table(rows))
     return 0
 

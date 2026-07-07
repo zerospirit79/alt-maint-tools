@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Literal
+
+from alt_maint_tools import __version__
 
 ProjectType = Literal["go", "rust", "ruby", "node"]
 
@@ -236,13 +239,28 @@ def export_vendors(project_dir: Path) -> ProjectType:
     return project_type
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = argv if argv is not None else sys.argv[1:]
-    if not args:
-        print("Использование: alt-vendor-export <путь_к_проекту>")
-        return 1
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="alt-vendor-export",
+        description=(
+            "Выгрузка вендоров для Go, Rust, Ruby или Node.js проекта "
+            "по маркерным файлам в каталоге."
+        ),
+    )
+    parser.add_argument("project_dir", help="Путь к каталогу проекта")
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    return parser
 
-    project_dir = Path(args[0]).resolve()
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    project_dir = Path(args.project_dir).resolve()
     try:
         project_type = export_vendors(project_dir)
     except VendorExportError as exc:

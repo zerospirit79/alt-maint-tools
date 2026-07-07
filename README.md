@@ -56,7 +56,7 @@ alt-vendor-export /path/to/project
 Для Rust:
 
 - в Sisyphus используется встроенная команда `cargo vendor`;
-- в p10/p11 может потребоваться отдельный пакет `cargo-vendor` (см. зависимости RPM-пакета).
+- в p10/p11 при сборке RPM-пакета включите `-with cargo_vendor`, либо установите `cargo-vendor` вручную.
 
 Для Node.js вендоры складываются в `.gear/predownloaded-development/` и `.gear/predownloaded-production/`.
 

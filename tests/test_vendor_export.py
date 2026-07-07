@@ -76,3 +76,12 @@ def test_vendor_rust_legacy(tmp_path: Path) -> None:
 def test_read_package_name_fallback(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     assert vendor_export._read_package_name(tmp_path) == tmp_path.name
+
+
+def test_main_help_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        vendor_export.main(["-h"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 0
+    assert "project_dir" in captured.out
+    assert "--version" in captured.out

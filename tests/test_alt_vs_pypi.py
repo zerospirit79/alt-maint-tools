@@ -86,3 +86,12 @@ def test_collect_results_sorts_by_status() -> None:
     assert [row.pypi_name for row in rows] == ["bar", "foo"]
     assert rows[0].status == "Обновить"
     assert rows[1].status == "Совпадает"
+
+
+def test_main_help_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        alt_vs_pypi.main(["-h"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 0
+    assert "maintainer" in captured.out
+    assert "--version" in captured.out
