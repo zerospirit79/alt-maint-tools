@@ -53,12 +53,94 @@ alt-vendor-export /path/to/project
 
 Тип проекта определяется автоматически по наличию `go.mod`, `Cargo.toml`, `Gemfile` или `package.json`.
 
-Для Rust:
+#### Go
+
+```bash
+alt-vendor-export /path/to/go-project
+```
+
+Выполняются `go mod tidy` и `go mod vendor`. Каталог `vendor/` появляется в дереве проекта.
+
+#### Rust
+
+```bash
+alt-vendor-export /path/to/rust-project
+```
 
 - в Sisyphus используется встроенная команда `cargo vendor`;
-- в p10/p11 при сборке RPM-пакета включите `-with cargo_vendor`, либо установите `cargo-vendor` вручную.
+- в p10/p11 при сборке RPM включите `-with cargo_vendor` либо установите `cargo-vendor` вручную.
 
-Для Node.js вендоры складываются в `.gear/predownloaded-development/` и `.gear/predownloaded-production/`.
+#### Ruby
+
+```bash
+alt-vendor-export /path/to/ruby-project
+```
+
+Зависимости ставятся через Bundler в `vendor/bundle`.
+
+#### Node.js
+
+Выгрузка следует [Node.js Policy](https://www.altlinux.org/Node.js_Policy) ALT Linux
+и раскладке пакетов вроде [`node-mocha`](https://git.altlinux.org/gears/n/node-mocha.git):
+зависимости кладутся в отдельный Source через `.gear/predownloaded-*`, а не
+коммитятся в основной tar исходников.
+
+```bash
+# Модуль node-* (mocha, webpack, eslint, …) — режим по умолчанию
+alt-vendor-export /path/to/node-module
+
+# Программа (pnpm, bun, …): node_modules в дереве исходников для hasher
+alt-vendor-export --inplace /path/to/program
+```
+
+Менеджер пакетов выбирается по lock-файлам:
+
+| Lock / маркер | Команда |
+|---|---|
+| `bun.lock` / `bun.lockb` | `bun install` |
+| `pnpm-lock.yaml` / `pnpm-workspace.yaml` | `pnpm install` |
+| `yarn.lock` | `yarn install` |
+| иначе | `npm install` |
+
+**Режим по умолчанию** (модули `node-*`):
+
+- `.gear/predownloaded-production/node_modules` — production-зависимости;
+- `.gear/predownloaded-development/node_modules` — полный набор (для сборок с devDeps);
+- из production убираются пакеты, уже есть в `%nodejs_sitelib` (`/usr/lib/node_modules`);
+- из вендоров удаляются ELF и `.node` (нативные модули — отдельные RPM по политике).
+
+Пример `.gear/rules`:
+
+```
+tar: @name@
+tar: .gear/predownloaded-production name=@name@-production-@version@ base=
+```
+
+Фрагмент spec:
+
+```spec
+Source: %name-%version.tar
+Source1: %name-production-%version.tar
+
+BuildRequires: rpm-build-nodejs node
+BuildRequires(pre): rpm-macros-nodejs
+
+%prep
+%setup -a 1
+
+%install
+mkdir -p %buildroot%nodejs_sitelib/%node_module/
+cp -a * %buildroot/%nodejs_sitelib/%node_module/
+```
+
+**Режим `--inplace`** (программы в `/usr/bin`, офлайн-сборка в hasher):
+
+- дополнительно оставляется `node_modules/` в корне проекта;
+- строки с `node_modules` в `.gitignore` комментируются (`# alt-vendor-export: …`),
+  чтобы gear мог упаковать модули в основной tar.
+
+По политике в `node_modules` программы не должно быть нативных бинарников —
+такие зависимости оформляются отдельными пакетами `nodejs-<имя>`.
 
 ## Разработка
 

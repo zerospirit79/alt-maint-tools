@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,22 @@ from typing import Literal
 from alt_maint_tools import __version__
 
 ProjectType = Literal["go", "rust", "ruby", "node"]
+NodePackageManager = Literal["npm", "pnpm", "yarn", "bun"]
+
+# Lines in .gitignore that would exclude node_modules from gear/hasher source trees.
+_NODE_MODULES_GITIGNORE_RE = re.compile(
+    r"""
+    ^\s*
+    !?                                   # optional negation
+    (?:
+        \*\*/node_modules(?:/\*\*)?      # **/node_modules or **/node_modules/**
+        | (?:.*/)?node_modules(?:_[*]|\*?|/|\*\*)?  # node_modules, node_modules/, node_modules_*
+        | _node_modules                  # pnpm alternate name
+    )
+    \s*(?:\#.*)?$
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
 
 
 class VendorExportError(Exception):
@@ -135,7 +152,43 @@ def _read_package_name(project_dir: Path) -> str:
     except (OSError, json.JSONDecodeError):
         return project_dir.name
     name = data.get("name")
-    return name if isinstance(name, str) and name else project_dir.name
+    if isinstance(name, str) and name:
+        # Scoped names like @scope/pkg must be safe as a single path segment.
+        return name.lstrip("@").replace("/", "-")
+    return project_dir.name
+
+
+def detect_node_package_manager(project_dir: Path) -> NodePackageManager:
+    """Detect Node package manager from lockfiles / workspace markers."""
+    if (project_dir / "bun.lockb").is_file() or (project_dir / "bun.lock").is_file():
+        return "bun"
+    if (project_dir / "pnpm-lock.yaml").is_file() or (
+        project_dir / "pnpm-workspace.yaml"
+    ).is_file():
+        return "pnpm"
+    if (project_dir / "yarn.lock").is_file():
+        return "yarn"
+    return "npm"
+
+
+def _is_node_workspace(project_dir: Path) -> bool:
+    """Return True when install must run in the project tree (monorepo)."""
+    if (project_dir / "pnpm-workspace.yaml").is_file():
+        return True
+    if (project_dir / "pnpm-lock.yaml").is_file():
+        # pnpm lockfiles often reference the full workspace layout.
+        return True
+    if (project_dir / "bun.lockb").is_file() or (project_dir / "bun.lock").is_file():
+        return True
+    package_json = project_dir / "package.json"
+    if not package_json.is_file():
+        return False
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    workspaces = data.get("workspaces")
+    return bool(workspaces)
 
 
 def _remove_dev_packages(work_dir: Path) -> None:
@@ -156,15 +209,17 @@ def _remove_dev_packages(work_dir: Path) -> None:
 
 
 def _deduplicate_system_node_modules(work_dir: Path) -> None:
+    """Drop deps already packaged in %nodejs_sitelib (ALT Node.js Policy)."""
     node_modules = work_dir / "node_modules"
     if not node_modules.is_dir():
         return
 
-    node_path = os.environ.get("NODE_PATH", "/usr/lib/node_modules")
-    for entry in node_modules.iterdir():
-        if not entry.is_dir():
+    # %nodejs_sitelib from rpm-macros-nodejs is %{_prefix}/lib/node_modules
+    node_path = Path(os.environ.get("NODE_PATH", "/usr/lib/node_modules"))
+    for entry in list(node_modules.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
             continue
-        if (Path(node_path) / entry.name).is_dir():
+        if (node_path / entry.name).is_dir():
             shutil.rmtree(entry)
 
     bin_dir = node_modules / ".bin"
@@ -176,18 +231,168 @@ def _deduplicate_system_node_modules(work_dir: Path) -> None:
 
 def _prepare_node_workdir(project_dir: Path, work_dir: Path) -> None:
     shutil.copy2(project_dir / "package.json", work_dir / "package.json")
-    lock_file = project_dir / "package-lock.json"
-    if lock_file.is_file():
-        shutil.copy2(lock_file, work_dir / "package-lock.json")
+    for lock_name in (
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+    ):
+        lock_file = project_dir / lock_name
+        if lock_file.is_file():
+            shutil.copy2(lock_file, work_dir / lock_name)
 
 
-def vendor_node(project_dir: Path) -> None:
-    require_command("npm", "Установите npm для Node.js-проектов.")
+def _node_install_command(
+    package_manager: NodePackageManager,
+    *,
+    production: bool,
+) -> list[str]:
+    if package_manager == "npm":
+        return ["npm", "install", "--omit=dev"] if production else ["npm", "install"]
+    if package_manager == "pnpm":
+        if production:
+            return ["pnpm", "install", "--prod", "--frozen-lockfile"]
+        return ["pnpm", "install", "--frozen-lockfile"]
+    if package_manager == "yarn":
+        return ["yarn", "install", "--production"] if production else ["yarn", "install"]
+    # bun
+    return ["bun", "install", "--production"] if production else ["bun", "install"]
 
-    package_name = _read_package_name(project_dir)
+
+def _require_node_package_manager(package_manager: NodePackageManager) -> None:
+    hints = {
+        "npm": "Установите npm для Node.js-проектов.",
+        "pnpm": "Установите pnpm (npm install -g pnpm) для pnpm-проектов.",
+        "yarn": "Установите yarn для Yarn-проектов.",
+        "bun": "Установите bun для Bun-проектов.",
+    }
+    require_command(package_manager, hints[package_manager])
+
+
+def unignore_node_modules_in_gitignore(project_dir: Path) -> int:
+    """Comment out node_modules ignore rules so gear can pack them in-tree.
+
+    Used with ``--inplace`` for program packages that ship node_modules in the
+    main source tree. Returns the number of lines that were commented out.
+    """
+    gitignore = project_dir / ".gitignore"
+    if not gitignore.is_file():
+        return 0
+
+    lines = gitignore.read_text(encoding="utf-8").splitlines(keepends=True)
+    changed = 0
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        if _NODE_MODULES_GITIGNORE_RE.match(line.rstrip("\n\r")):
+            eol = ""
+            body = line
+            if body.endswith("\r\n"):
+                eol = "\r\n"
+                body = body[:-2]
+            elif body.endswith("\n"):
+                eol = "\n"
+                body = body[:-1]
+            new_lines.append(f"# alt-vendor-export: {body}{eol}")
+            changed += 1
+        else:
+            new_lines.append(line)
+
+    if changed:
+        gitignore.write_text("".join(new_lines), encoding="utf-8")
+    return changed
+
+
+def _copy_node_modules(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, symlinks=True)
+
+
+def _strip_native_binaries(node_modules: Path) -> int:
+    """Remove ELF/.node binaries from vendored modules (ALT Node.js Policy).
+
+    Native modules must be separate RPM packages; JS CLI scripts with a shebang
+    are left intact.
+    """
+    if not node_modules.is_dir():
+        return 0
+
+    removed = 0
+    for path in node_modules.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        drop = path.suffix == ".node"
+        if not drop:
+            try:
+                with path.open("rb") as handle:
+                    magic = handle.read(4)
+            except OSError:
+                continue
+            drop = magic == b"\x7fELF"
+        if drop:
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def _install_node_in_workdir(
+    project_dir: Path,
+    work_dir: Path,
+    package_manager: NodePackageManager,
+    *,
+    production: bool,
+    cleanup_dev_packages: bool = False,
+    dedupe_system: bool = False,
+) -> Path:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_node_workdir(project_dir, work_dir)
+    run_command(
+        _node_install_command(package_manager, production=production),
+        cwd=work_dir,
+    )
+    if cleanup_dev_packages and package_manager == "npm":
+        _remove_dev_packages(work_dir)
+    if dedupe_system:
+        _deduplicate_system_node_modules(work_dir)
+    node_modules = work_dir / "node_modules"
+    if not node_modules.is_dir():
+        raise VendorExportError(
+            f"После установки не найден каталог node_modules в {work_dir}"
+        )
+    return node_modules
+
+
+def vendor_node(project_dir: Path, *, inplace: bool = False) -> None:
+    """Export Node.js dependencies per ALT Node.js Policy / rpm-build-nodejs.
+
+    Default layout (as in node-mocha / node-webpack)::
+
+        .gear/predownloaded-production/node_modules/
+        .gear/predownloaded-development/node_modules/
+
+    Gear packs production modules as a separate Source::
+
+        tar: .gear/predownloaded-production name=@name@-production-@version@ base=
+
+    With ``inplace=True`` (program packages / special hasher builds), also keep
+    ``node_modules/`` in the project tree and comment out related ``.gitignore``
+    rules.
+    """
+    package_manager = detect_node_package_manager(project_dir)
+    _require_node_package_manager(package_manager)
+
     gear_dir = project_dir / ".gear"
-    dev_target = gear_dir / "predownloaded-development" / package_name
-    prod_target = gear_dir / "predownloaded-production" / package_name
+    # Layout matches lav's packages: no package-name subdirectory.
+    dev_target = gear_dir / "predownloaded-development" / "node_modules"
+    prod_target = gear_dir / "predownloaded-production" / "node_modules"
+    project_node_modules = project_dir / "node_modules"
     dev_work = gear_dir / ".tmp-node-dev"
     prod_work = gear_dir / ".tmp-node-prod"
 
@@ -195,29 +400,64 @@ def vendor_node(project_dir: Path) -> None:
         if path.exists():
             shutil.rmtree(path)
 
-    dev_target.parent.mkdir(parents=True, exist_ok=True)
-    prod_target.parent.mkdir(parents=True, exist_ok=True)
-    dev_work.mkdir(parents=True, exist_ok=True)
-    prod_work.mkdir(parents=True, exist_ok=True)
+    created_project_modules = False
 
-    _prepare_node_workdir(project_dir, dev_work)
-    run_command(["npm", "install"], cwd=dev_work)
-    try:
-        _remove_dev_packages(dev_work)
-    except VendorExportError:
-        pass
-    shutil.copytree(dev_work / "node_modules", dev_target / "node_modules")
+    if _is_node_workspace(project_dir):
+        # Monorepos need an in-tree install (workspace: / catalog protocols).
+        if project_node_modules.exists():
+            shutil.rmtree(project_node_modules)
+        run_command(
+            _node_install_command(package_manager, production=False),
+            cwd=project_dir,
+        )
+        if not project_node_modules.is_dir():
+            raise VendorExportError(
+                f"После установки не найден каталог node_modules в {project_dir}"
+            )
+        created_project_modules = True
+        _copy_node_modules(project_node_modules, dev_target)
+        _copy_node_modules(project_node_modules, prod_target)
+        _deduplicate_system_node_modules(prod_target.parent)
+    else:
+        try:
+            dev_modules = _install_node_in_workdir(
+                project_dir,
+                dev_work,
+                package_manager,
+                production=False,
+                cleanup_dev_packages=True,
+            )
+            _copy_node_modules(dev_modules, dev_target)
 
-    _prepare_node_workdir(project_dir, prod_work)
-    run_command(["npm", "install", "--omit=dev"], cwd=prod_work)
-    _deduplicate_system_node_modules(prod_work)
-    shutil.copytree(prod_work / "node_modules", prod_target / "node_modules")
+            prod_modules = _install_node_in_workdir(
+                project_dir,
+                prod_work,
+                package_manager,
+                production=True,
+                dedupe_system=True,
+            )
+            _copy_node_modules(prod_modules, prod_target)
 
-    shutil.rmtree(dev_work)
-    shutil.rmtree(prod_work)
+            if inplace:
+                _copy_node_modules(dev_modules, project_node_modules)
+                created_project_modules = True
+        finally:
+            shutil.rmtree(dev_work, ignore_errors=True)
+            shutil.rmtree(prod_work, ignore_errors=True)
+
+    _strip_native_binaries(prod_target)
+    _strip_native_binaries(dev_target)
+
+    if inplace:
+        if not project_node_modules.is_dir():
+            _copy_node_modules(dev_target, project_node_modules)
+        unignore_node_modules_in_gitignore(project_dir)
+    elif created_project_modules and project_node_modules.is_dir():
+        # Keep source tree clean for node-* module packaging (mocha style).
+        shutil.rmtree(project_node_modules)
 
 
-def export_vendors(project_dir: Path) -> ProjectType:
+def export_vendors(project_dir: Path, *, inplace: bool = False) -> ProjectType:
     """Export vendors for the detected project type."""
     if not project_dir.is_dir():
         raise VendorExportError(f"Папка проекта не найдена: {project_dir}")
@@ -229,13 +469,15 @@ def export_vendors(project_dir: Path) -> ProjectType:
             "Проверьте наличие go.mod, Cargo.toml, Gemfile или package.json."
         )
 
-    exporters = {
-        "go": vendor_go,
-        "rust": vendor_rust,
-        "ruby": vendor_ruby,
-        "node": vendor_node,
-    }
-    exporters[project_type](project_dir)
+    if project_type == "node":
+        vendor_node(project_dir, inplace=inplace)
+    else:
+        exporters = {
+            "go": vendor_go,
+            "rust": vendor_rust,
+            "ruby": vendor_ruby,
+        }
+        exporters[project_type](project_dir)
     return project_type
 
 
@@ -248,6 +490,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("project_dir", help="Путь к каталогу проекта")
+    parser.add_argument(
+        "--inplace",
+        action="store_true",
+        help=(
+            "Для Node.js: также оставить node_modules/ в дереве проекта и "
+            "раскомментировать его в .gitignore (программы / hasher). "
+            "По умолчанию модули только в .gear/predownloaded-* "
+            "(как node-mocha / Node.js Policy)."
+        ),
+    )
     parser.add_argument(
         "-v",
         "--version",
@@ -262,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     project_dir = Path(args.project_dir).resolve()
     try:
-        project_type = export_vendors(project_dir)
+        project_type = export_vendors(project_dir, inplace=args.inplace)
     except VendorExportError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -274,6 +526,21 @@ def main(argv: list[str] | None = None) -> int:
         "node": "Node.js",
     }
     print(f"Вендоры для {labels[project_type]} успешно выгружены!")
+    if project_type == "node":
+        print(
+            "Модули: .gear/predownloaded-production/node_modules "
+            "(и predownloaded-development)."
+        )
+        print(
+            "В .gear/rules добавьте:\n"
+            "  tar: .gear/predownloaded-production "
+            "name=@name@-production-@version@ base="
+        )
+        if args.inplace:
+            print(
+                "Режим --inplace: node_modules/ в дереве проекта; "
+                "правила node_modules в .gitignore закомментированы."
+            )
     print("Выгрузка вендоров завершена!")
     return 0
 
