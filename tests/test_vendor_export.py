@@ -26,6 +26,15 @@ def test_detect_project_type(tmp_path: Path, files: list[str], expected: str | N
     assert vendor_export.detect_project_type(tmp_path) == expected
 
 
+def test_detect_project_type_pnpm_monorepo_with_cargo(tmp_path: Path) -> None:
+    """pnpm keeps Cargo.toml at the repo root but is packaged as Node.js."""
+    (tmp_path / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - '*'\n", encoding="utf-8")
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
+    assert vendor_export.detect_project_type(tmp_path) == "node"
+
+
 @pytest.mark.parametrize(
     ("files", "expected"),
     [
@@ -69,13 +78,9 @@ def test_vendor_go(tmp_path: Path) -> None:
         ["go", "mod", "vendor"],
     ]
     assert (
-        tmp_path / ".gear" / "predownloaded-production" / "vendor" / "example.com" / "demo" / "mod.go"
+        tmp_path / "vendor" / "example.com" / "demo" / "mod.go"
     ).is_file()
-    assert (
-        tmp_path / ".gear" / "predownloaded-development" / "vendor" / "example.com" / "demo" / "mod.go"
-    ).is_file()
-    # Default: no in-tree vendor (etersoft packs only predownloaded).
-    assert not (tmp_path / "vendor").exists()
+    assert not (tmp_path / ".gear" / "predownloaded-production").exists()
 
 
 def test_vendor_go_inplace(tmp_path: Path) -> None:
@@ -90,7 +95,7 @@ def test_vendor_go_inplace(tmp_path: Path) -> None:
             vendor_export.vendor_go(tmp_path, inplace=True)
 
     assert (tmp_path / "vendor" / "pkg").is_dir()
-    assert (tmp_path / ".gear" / "predownloaded-production" / "vendor" / "pkg").is_dir()
+    assert not (tmp_path / ".gear" / "predownloaded-production").exists()
 
 
 def test_vendor_rust_modern(tmp_path: Path) -> None:
@@ -107,10 +112,9 @@ def test_vendor_rust_modern(tmp_path: Path) -> None:
         with patch.object(vendor_export, "_run_cargo_vendor", side_effect=fake_run_cargo):
             vendor_export.vendor_rust(tmp_path)
 
-    assert (tmp_path / ".gear" / "predownloaded-production" / "vendor" / "crate").is_dir()
-    assert (tmp_path / ".gear" / "predownloaded-development" / "vendor" / "crate").is_dir()
+    assert (tmp_path / "vendor" / "crate").is_dir()
     assert "vendored-sources" in (tmp_path / ".gear" / "config.toml").read_text(encoding="utf-8")
-    assert not (tmp_path / "vendor").exists()
+    assert not (tmp_path / ".gear" / "predownloaded-production").exists()
 
 
 def test_vendor_rust_legacy(tmp_path: Path) -> None:
@@ -127,10 +131,8 @@ def test_vendor_rust_legacy(tmp_path: Path) -> None:
         ):
             vendor_export.vendor_rust(tmp_path)
 
-    assert (
-        tmp_path / ".gear" / "predownloaded-production" / "vendor" / "demo-crate" / "lib.rs"
-    ).is_file()
-    assert not (tmp_path / "vendor").exists()
+    assert (tmp_path / "vendor" / "demo-crate" / "lib.rs").is_file()
+    assert not (tmp_path / ".gear" / "predownloaded-production").exists()
 
 
 def test_read_package_name_fallback(tmp_path: Path) -> None:

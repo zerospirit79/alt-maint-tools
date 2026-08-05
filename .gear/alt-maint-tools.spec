@@ -10,7 +10,6 @@ Summary(ru_RU): Утилиты для мейнтейнеров пакетов AL
 License: MIT
 Group: Development/Tools
 Url: https://github.com/zerospirit79/alt-maint-tools
-Vcs: https://github.com/zerospirit79/alt-maint-tools
 BuildArch: noarch
 
 Source: %name-%version.tar

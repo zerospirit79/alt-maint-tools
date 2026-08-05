@@ -53,24 +53,30 @@ alt-vendor-export /path/to/project
 
 Тип проекта определяется по `go.mod`, `Cargo.toml`, `Gemfile` или `package.json`.
 
-Результат кладётся в каталоги [etersoft-build-utils](https://www.altlinux.org/Etersoft-build-utils/extra_sources)
-(как у `rpmgs`):
+Раскладка зависимостей:
 
-| Тип | Каталог внутри `.gear/predownloaded-{production,development}/` |
+| Тип | Где лежат зависимости |
 |---|---|
-| Go / Rust / Ruby | `vendor/` |
-| Node.js (npm/pnpm/yarn/bun) | `node_modules/` |
+| **Go / Rust / Ruby** | `vendor/` в корне проекта (для Rust также `.gear/config.toml`) |
+| **Node.js** | `node_modules/` внутри `.gear/predownloaded-{production,development}/` |
 
-В `.gear/rules`:
+В `.gear/rules` для **Go / Rust / Ruby**:
+
+```
+tar: @version@:.
+tar: vendor name=vendor
+spec: .gear/%name.spec
+```
+
+Для **Node.js** (как [`node-mocha`](https://git.altlinux.org/gears/n/node-mocha.git)):
 
 ```
 tar: @name@
 tar: .gear/predownloaded-production name=@name@-production-@version@ base=
-tar: .gear/predownloaded-development name=@name@-development-@version@ base=
 ```
 
-Флаг `--inplace` дополнительно оставляет `vendor/` или `node_modules/` в дереве
-исходников (удобно для офлайн-сборки в hasher).
+Флаг `--inplace` для Node.js дополнительно оставляет `node_modules/` в дереве
+исходников (офлайн-сборка в hasher).
 
 #### Go
 
@@ -78,7 +84,7 @@ tar: .gear/predownloaded-development name=@name@-development-@version@ base=
 alt-vendor-export /path/to/go-project
 ```
 
-`go mod tidy` + `go mod vendor` → `.gear/predownloaded-*/vendor`.
+`go mod tidy` + `go mod vendor` → `vendor/` в корне проекта.
 
 #### Rust
 
@@ -86,7 +92,7 @@ alt-vendor-export /path/to/go-project
 alt-vendor-export /path/to/rust-project
 ```
 
-`cargo vendor` → `.gear/predownloaded-*/vendor`; сниппет source-replace
+`cargo vendor` → `vendor/` в корне проекта; сниппет source-replace
 сохраняется в `.gear/config.toml`. В p10/p11 при сборке RPM может понадобиться
 `-with cargo_vendor` или пакет `cargo-vendor`.
 
@@ -96,8 +102,7 @@ alt-vendor-export /path/to/rust-project
 alt-vendor-export /path/to/ruby-project
 ```
 
-Bundler ставит гемы в `vendor/bundle`, затем дерево копируется в
-`.gear/predownloaded-*/vendor`.
+Bundler ставит гемы в `vendor/bundle` в корне проекта.
 
 #### Node.js
 

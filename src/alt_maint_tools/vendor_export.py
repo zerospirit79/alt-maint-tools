@@ -37,15 +37,34 @@ class VendorExportError(Exception):
     """Raised when vendor export cannot be completed."""
 
 
+def _has_node_ecosystem_markers(project_dir: Path) -> bool:
+    """Return True when the tree looks like an npm/pnpm/yarn/bun project root."""
+    markers = (
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    )
+    return any((project_dir / name).is_file() for name in markers)
+
+
 def detect_project_type(project_dir: Path) -> ProjectType | None:
     """Detect project type from marker files."""
     if (project_dir / "go.mod").is_file():
         return "go"
+    has_package_json = (project_dir / "package.json").is_file()
+    # Monorepos like pnpm ship a root Cargo.toml for native crates but are
+    # packaged as Node.js programs (node_modules in predownloaded-*).
+    if has_package_json and _has_node_ecosystem_markers(project_dir):
+        return "node"
     if (project_dir / "Cargo.toml").is_file():
         return "rust"
     if (project_dir / "Gemfile").is_file():
         return "ruby"
-    if (project_dir / "package.json").is_file():
+    if has_package_json:
         return "node"
     return None
 
@@ -76,38 +95,6 @@ def run_command(
         raise VendorExportError(f"Команда завершилась с ошибкой: {command}") from exc
 
 
-PREDOWNLOADED_MODES = ("development", "production")
-
-
-def _predownloaded_root(project_dir: Path, mode: str) -> Path:
-    return project_dir / ".gear" / f"predownloaded-{mode}"
-
-
-def _publish_to_predownloaded(
-    project_dir: Path,
-    source: Path,
-    keep_name: str,
-    *,
-    strip_binaries: bool = False,
-) -> None:
-    """Place *source* as ``.gear/predownloaded-*/{keep_name}`` (etersoft/rpmgs).
-
-    Both development and production trees are filled — same as ``rpmgs`` for
-    go/cargo/composer where the install does not differ by mode.
-    """
-    if not source.exists():
-        raise VendorExportError(f"Не найден каталог для упаковки: {source}")
-
-    for mode in PREDOWNLOADED_MODES:
-        dest = _predownloaded_root(project_dir, mode) / keep_name
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, dest, symlinks=True)
-        if strip_binaries:
-            _strip_shared_binaries(dest)
-
-
 def _strip_shared_binaries(tree: Path) -> int:
     """Drop ``.a`` / ``.so`` / ``.dll`` from vendored trees (rpmgs for non-cargo)."""
     if not tree.is_dir():
@@ -122,15 +109,8 @@ def _strip_shared_binaries(tree: Path) -> int:
     return removed
 
 
-def _cleanup_in_tree_vendor(project_dir: Path, *, inplace: bool) -> None:
-    vendor_dir = project_dir / "vendor"
-    if inplace or not vendor_dir.exists():
-        return
-    shutil.rmtree(vendor_dir)
-
-
 def vendor_go(project_dir: Path, *, inplace: bool = False) -> None:
-    """Vendor Go modules into ``.gear/predownloaded-*/vendor`` (etersoft/rpmgs)."""
+    """Vendor Go modules into ``vendor/`` in the project tree."""
     require_command("go", "Установите golang для Go-проектов.")
     env = {**os.environ, "GOWORK": "off"}
     run_command(["go", "mod", "tidy"], cwd=project_dir, env=env)
@@ -140,10 +120,7 @@ def vendor_go(project_dir: Path, *, inplace: bool = False) -> None:
         raise VendorExportError(
             f"После go mod vendor не найден каталог vendor в {project_dir}"
         )
-    _publish_to_predownloaded(
-        project_dir, vendor_dir, "vendor", strip_binaries=True
-    )
-    _cleanup_in_tree_vendor(project_dir, inplace=inplace)
+    _strip_shared_binaries(vendor_dir)
 
 
 def _copy_legacy_rust_vendor(project_dir: Path, legacy_vendor: Path) -> None:
@@ -193,7 +170,12 @@ def _save_cargo_config(project_dir: Path, config_text: str) -> None:
 
 
 def vendor_rust(project_dir: Path, *, inplace: bool = False) -> None:
-    """Vendor crates into ``.gear/predownloaded-*/vendor`` (etersoft/rpmgs)."""
+    """Vendor crates into ``vendor/`` in the project tree (ALT gear / ripgrep layout).
+
+    ``cargo vendor`` creates ``vendor/`` at the project root; source-replace config
+    is saved to ``.gear/config.toml``. Unlike Node.js, Rust deps are not placed
+    under ``.gear/predownloaded-*`` — gear rules use ``tar: vendor name=vendor``.
+    """
     require_command("cargo", "Установите rust для Rust-проектов.")
 
     vendor_dir = project_dir / "vendor"
@@ -235,12 +217,10 @@ def vendor_rust(project_dir: Path, *, inplace: bool = False) -> None:
                 path.unlink(missing_ok=True)
 
     _save_cargo_config(project_dir, config_text)
-    _publish_to_predownloaded(project_dir, vendor_dir, "vendor")
-    _cleanup_in_tree_vendor(project_dir, inplace=inplace)
 
 
 def vendor_ruby(project_dir: Path, *, inplace: bool = False) -> None:
-    """Vendor gems into ``.gear/predownloaded-*/vendor`` (bundle path vendor/bundle)."""
+    """Vendor gems into ``vendor/bundle`` in the project tree (Bundler path)."""
     require_command("ruby", "Установите ruby для Ruby-проектов.")
     require_command(
         "bundle",
@@ -256,8 +236,6 @@ def vendor_ruby(project_dir: Path, *, inplace: bool = False) -> None:
         raise VendorExportError(
             f"После bundle install не найден каталог vendor в {project_dir}"
         )
-    _publish_to_predownloaded(project_dir, vendor_dir, "vendor")
-    _cleanup_in_tree_vendor(project_dir, inplace=inplace)
 
 
 def _read_package_name(project_dir: Path) -> str:
@@ -637,8 +615,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alt-vendor-export",
         description=(
-            "Выгрузка вендоров в .gear/predownloaded-* "
-            "(схема etersoft-build-utils / rpmgs) для Go, Rust, Ruby или Node.js."
+            "Выгрузка вендоров для Go, Rust, Ruby или Node.js: "
+            "vendor/ в дереве проекта (Go/Rust/Ruby) или "
+            ".gear/predownloaded-*/node_modules (Node.js)."
         ),
     )
     parser.add_argument("project_dir", help="Путь к каталогу проекта")
@@ -646,11 +625,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--inplace",
         action="store_true",
         help=(
-            "Также оставить vendor/ или node_modules/ в дереве проекта "
-            "(офлайн-сборка в hasher). По умолчанию только "
-            ".gear/predownloaded-development и "
-            ".gear/predownloaded-production. Для Node.js дополнительно "
-            "комментируются правила node_modules в .gitignore."
+            "Для Node.js: оставить node_modules/ в дереве проекта (офлайн-сборка "
+            "в hasher) и закомментировать правила node_modules в .gitignore. "
+            "Для Go/Rust/Ruby vendor/ всегда в корне проекта."
         ),
     )
     parser.add_argument(
@@ -679,26 +656,32 @@ def main(argv: list[str] | None = None) -> int:
         "node": "Node.js",
     }
     print(f"Вендоры для {labels[project_type]} успешно выгружены!")
-    keep = "node_modules" if project_type == "node" else "vendor"
-    print(
-        f"Каталоги: .gear/predownloaded-production/{keep} "
-        f"и .gear/predownloaded-development/{keep}"
-    )
-    print(
-        "В .gear/rules добавьте (см. Etersoft-build-utils / extra sources):\n"
-        "  tar: .gear/predownloaded-production "
-        "name=@name@-production-@version@ base=\n"
-        "  tar: .gear/predownloaded-development "
-        "name=@name@-development-@version@ base="
-    )
-    if args.inplace:
-        if project_type == "node":
-            print(
-                "Режим --inplace: node_modules/ в дереве проекта; "
-                "правила node_modules в .gitignore закомментированы."
-            )
-        else:
-            print("Режим --inplace: vendor/ оставлен в дереве проекта.")
+    if project_type == "node":
+        keep = "node_modules"
+        print(
+            f"Каталоги: .gear/predownloaded-production/{keep} "
+            f"и .gear/predownloaded-development/{keep}"
+        )
+        print(
+            "В .gear/rules добавьте:\n"
+            "  tar: @name@\n"
+            "  tar: .gear/predownloaded-production "
+            "name=@name@-production-@version@ base="
+        )
+    else:
+        print("Каталог: vendor/ в дереве проекта")
+        if project_type == "rust":
+            print("Конфиг cargo: .gear/config.toml")
+        print(
+            "В .gear/rules:\n"
+            "  tar: @version@:.\n"
+            "  tar: vendor name=vendor"
+        )
+    if args.inplace and project_type == "node":
+        print(
+            "Режим --inplace: node_modules/ в дереве проекта; "
+            "правила node_modules в .gitignore закомментированы."
+        )
     print("Выгрузка вендоров завершена!")
     return 0
 
