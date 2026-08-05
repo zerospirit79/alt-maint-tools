@@ -45,13 +45,32 @@ alt-branch-compare zerospirit -b p9
 
 Поддерживаются ветки `p9`, `p10`, `p11`, `c9f1`, `c9f2`, `c10f1`, `c10f2`, `c11f1`, `c11f2` и любые другие, доступные в RDB.
 
-### Выгрузка вендоров
+### Выгрузка вендоров (Etersoft / extra sources)
 
 ```bash
 alt-vendor-export /path/to/project
 ```
 
-Тип проекта определяется автоматически по наличию `go.mod`, `Cargo.toml`, `Gemfile` или `package.json`.
+Тип проекта определяется по `go.mod`, `Cargo.toml`, `Gemfile` или `package.json`.
+
+Результат кладётся в каталоги [etersoft-build-utils](https://www.altlinux.org/Etersoft-build-utils/extra_sources)
+(как у `rpmgs`):
+
+| Тип | Каталог внутри `.gear/predownloaded-{production,development}/` |
+|---|---|
+| Go / Rust / Ruby | `vendor/` |
+| Node.js (npm/pnpm/yarn/bun) | `node_modules/` |
+
+В `.gear/rules`:
+
+```
+tar: @name@
+tar: .gear/predownloaded-production name=@name@-production-@version@ base=
+tar: .gear/predownloaded-development name=@name@-development-@version@ base=
+```
+
+Флаг `--inplace` дополнительно оставляет `vendor/` или `node_modules/` в дереве
+исходников (удобно для офлайн-сборки в hasher).
 
 #### Go
 
@@ -59,7 +78,7 @@ alt-vendor-export /path/to/project
 alt-vendor-export /path/to/go-project
 ```
 
-Выполняются `go mod tidy` и `go mod vendor`. Каталог `vendor/` появляется в дереве проекта.
+`go mod tidy` + `go mod vendor` → `.gear/predownloaded-*/vendor`.
 
 #### Rust
 
@@ -67,8 +86,9 @@ alt-vendor-export /path/to/go-project
 alt-vendor-export /path/to/rust-project
 ```
 
-- в Sisyphus используется встроенная команда `cargo vendor`;
-- в p10/p11 при сборке RPM включите `-with cargo_vendor` либо установите `cargo-vendor` вручную.
+`cargo vendor` → `.gear/predownloaded-*/vendor`; сниппет source-replace
+сохраняется в `.gear/config.toml`. В p10/p11 при сборке RPM может понадобиться
+`-with cargo_vendor` или пакет `cargo-vendor`.
 
 #### Ruby
 
@@ -76,14 +96,15 @@ alt-vendor-export /path/to/rust-project
 alt-vendor-export /path/to/ruby-project
 ```
 
-Зависимости ставятся через Bundler в `vendor/bundle`.
+Bundler ставит гемы в `vendor/bundle`, затем дерево копируется в
+`.gear/predownloaded-*/vendor`.
 
 #### Node.js
 
 Выгрузка следует [Node.js Policy](https://www.altlinux.org/Node.js_Policy) ALT Linux
-и раскладке пакетов вроде [`node-mocha`](https://git.altlinux.org/gears/n/node-mocha.git):
-зависимости кладутся в отдельный Source через `.gear/predownloaded-*`, а не
-коммитятся в основной tar исходников.
+и раскладке пакетов вроде [`node-mocha`](https://git.altlinux.org/gears/n/node-mocha.git) /
+[`node-canvas`](https://git.altlinux.org/gears/n/node-canvas.git):
+зависимости — отдельный Source через `.gear/predownloaded-*`, не основной tar.
 
 ```bash
 # Модуль node-* (mocha, webpack, eslint, …) — режим по умолчанию
@@ -98,8 +119,8 @@ alt-vendor-export --inplace /path/to/program
 | Lock / маркер | Команда |
 |---|---|
 | `bun.lock` / `bun.lockb` | `bun install` |
-| `pnpm-lock.yaml` / `pnpm-workspace.yaml` | `pnpm install` |
-| `yarn.lock` | `yarn install` |
+| `pnpm-lock.yaml` / `pnpm-workspace.yaml` | `pnpm install --frozen-lockfile --ignore-scripts` |
+| `yarn.lock` | `yarn install --frozen-lockfile --ignore-scripts` |
 | иначе | `npm install` |
 
 **Режим по умолчанию** (модули `node-*`):

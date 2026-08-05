@@ -54,30 +54,63 @@ def test_export_vendors_unknown_project(tmp_path: Path) -> None:
 def test_vendor_go(tmp_path: Path) -> None:
     (tmp_path / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
 
+    def fake_run_command(args: list[str], *, cwd: Path, env=None) -> None:
+        if args == ["go", "mod", "vendor"]:
+            vendor = cwd / "vendor" / "example.com" / "demo"
+            vendor.mkdir(parents=True)
+            (vendor / "mod.go").write_text("package demo\n", encoding="utf-8")
+
     with patch.object(vendor_export.shutil, "which", return_value="/usr/bin/go"):
-        with patch.object(vendor_export, "run_command") as run_command:
+        with patch.object(vendor_export, "run_command", side_effect=fake_run_command) as run_command:
             vendor_export.vendor_go(tmp_path)
 
     assert [call.args[0] for call in run_command.call_args_list] == [
         ["go", "mod", "tidy"],
         ["go", "mod", "vendor"],
     ]
+    assert (
+        tmp_path / ".gear" / "predownloaded-production" / "vendor" / "example.com" / "demo" / "mod.go"
+    ).is_file()
+    assert (
+        tmp_path / ".gear" / "predownloaded-development" / "vendor" / "example.com" / "demo" / "mod.go"
+    ).is_file()
+    # Default: no in-tree vendor (etersoft packs only predownloaded).
+    assert not (tmp_path / "vendor").exists()
+
+
+def test_vendor_go_inplace(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
+
+    def fake_run_command(args: list[str], *, cwd: Path, env=None) -> None:
+        if args == ["go", "mod", "vendor"]:
+            (cwd / "vendor" / "pkg").mkdir(parents=True)
+
+    with patch.object(vendor_export.shutil, "which", return_value="/usr/bin/go"):
+        with patch.object(vendor_export, "run_command", side_effect=fake_run_command):
+            vendor_export.vendor_go(tmp_path, inplace=True)
+
+    assert (tmp_path / "vendor" / "pkg").is_dir()
+    assert (tmp_path / ".gear" / "predownloaded-production" / "vendor" / "pkg").is_dir()
 
 
 def test_vendor_rust_modern(tmp_path: Path) -> None:
     (tmp_path / "Cargo.toml").write_text("[package]\nname = \"demo\"\n", encoding="utf-8")
 
-    def fake_run_command(args: list[str], *, cwd: Path) -> None:
-        if args == ["cargo", "vendor", "vendor"]:
-            vendor_dir = cwd / "vendor"
-            vendor_dir.mkdir()
-            (vendor_dir / "crate").mkdir()
+    def fake_run_cargo(project_dir: Path, args: list[str]) -> str:
+        assert args == ["cargo", "vendor", "vendor"]
+        vendor_dir = project_dir / "vendor"
+        vendor_dir.mkdir()
+        (vendor_dir / "crate").mkdir()
+        return '[source.vendored-sources]\ndirectory = "vendor"\n'
 
     with patch.object(vendor_export.shutil, "which", return_value="/usr/bin/cargo"):
-        with patch.object(vendor_export, "run_command", side_effect=fake_run_command) as run_command:
+        with patch.object(vendor_export, "_run_cargo_vendor", side_effect=fake_run_cargo):
             vendor_export.vendor_rust(tmp_path)
 
-    run_command.assert_called_once_with(["cargo", "vendor", "vendor"], cwd=tmp_path)
+    assert (tmp_path / ".gear" / "predownloaded-production" / "vendor" / "crate").is_dir()
+    assert (tmp_path / ".gear" / "predownloaded-development" / "vendor" / "crate").is_dir()
+    assert "vendored-sources" in (tmp_path / ".gear" / "config.toml").read_text(encoding="utf-8")
+    assert not (tmp_path / "vendor").exists()
 
 
 def test_vendor_rust_legacy(tmp_path: Path) -> None:
@@ -87,10 +120,17 @@ def test_vendor_rust_legacy(tmp_path: Path) -> None:
     (legacy_src / "lib.rs").write_text("// demo\n", encoding="utf-8")
 
     with patch.object(vendor_export.shutil, "which", return_value="/usr/bin/cargo"):
-        with patch.object(vendor_export, "run_command", side_effect=vendor_export.VendorExportError("fail")):
+        with patch.object(
+            vendor_export,
+            "_run_cargo_vendor",
+            side_effect=vendor_export.VendorExportError("fail"),
+        ):
             vendor_export.vendor_rust(tmp_path)
 
-    assert (tmp_path / "vendor" / "demo-crate" / "lib.rs").is_file()
+    assert (
+        tmp_path / ".gear" / "predownloaded-production" / "vendor" / "demo-crate" / "lib.rs"
+    ).is_file()
+    assert not (tmp_path / "vendor").exists()
 
 
 def test_read_package_name_fallback(tmp_path: Path) -> None:
@@ -210,6 +250,27 @@ def test_vendor_node_inplace(tmp_path: Path) -> None:
     )
 
 
+def test_remove_all_node_modules(tmp_path: Path) -> None:
+    root_modules = tmp_path / "node_modules" / "left-pad"
+    root_modules.mkdir(parents=True)
+    (root_modules / "index.js").write_text("1", encoding="utf-8")
+    nested = tmp_path / ".meta-updater" / "node_modules" / "write-json-file"
+    nested.mkdir(parents=True)
+    (nested / "index.js").write_text("2", encoding="utf-8")
+    (tmp_path / ".gear" / "predownloaded-production" / "node_modules" / "keep").mkdir(
+        parents=True
+    )
+    (tmp_path / ".git" / "node_modules" / "ignored").mkdir(parents=True)
+
+    vendor_export._remove_all_node_modules(tmp_path)
+
+    assert not (tmp_path / "node_modules").exists()
+    assert not (tmp_path / ".meta-updater" / "node_modules").exists()
+    # Gear / .git trees must not be swept.
+    assert (tmp_path / ".gear" / "predownloaded-production" / "node_modules" / "keep").is_dir()
+    assert (tmp_path / ".git" / "node_modules" / "ignored").is_dir()
+
+
 def test_vendor_node_pnpm_workspace(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         '{"name": "monorepo-root", "private": true}',
@@ -217,9 +278,13 @@ def test_vendor_node_pnpm_workspace(tmp_path: Path) -> None:
     )
     (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
     (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'packages/*'\n", encoding="utf-8")
+    stale = tmp_path / ".meta-updater" / "node_modules" / "write-json-file"
+    stale.mkdir(parents=True)
+    (stale / "index.js").write_text("stale", encoding="utf-8")
 
     def fake_run_command(args: list[str], *, cwd: Path, env=None) -> None:
         assert args[:2] == ["pnpm", "install"]
+        assert not (cwd / ".meta-updater" / "node_modules").exists()
         (cwd / "node_modules" / "demo").mkdir(parents=True)
         (cwd / "node_modules" / "demo" / "index.js").write_text("1", encoding="utf-8")
 
