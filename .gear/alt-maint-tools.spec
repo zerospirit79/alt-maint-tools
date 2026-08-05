@@ -3,7 +3,7 @@
 %def_with check
 
 Name: alt-maint-tools
-Version: 0.1.1
+Version: 0.1.2
 Release: alt1
 Summary: Utilities for ALT Linux package maintainers
 Summary(ru_RU): Утилиты для мейнтейнеров пакетов ALT Linux
@@ -74,5 +74,8 @@ Python-пакетов с PyPI, сравнение версий между вет
 %python3_sitelibdir/%{pyproject_distinfo %mod_name}/
 
 %changelog
+* Wed Aug 05 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.2-alt1
+- Align Node.js vendor export with ALT Node.js Policy.
+
 * Tue Jul 07 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.1-alt1
 - Initial build for Sisyphus.
