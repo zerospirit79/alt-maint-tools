@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alt-maint-tools"
-version = "0.1.4"
+version = "0.1.5"
 description = "Utilities for ALT Linux package maintainers"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,6 +43,7 @@ Issues = "https://github.com/zerospirit79/alt-maint-tools/issues"
 alt-vs-pypi = "alt_maint_tools.alt_vs_pypi:main"
 alt-branch-compare = "alt_maint_tools.branch_compare:main"
 alt-vendor-export = "alt_maint_tools.vendor_export:main"
+alt-node-store = "alt_maint_tools.node_store:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

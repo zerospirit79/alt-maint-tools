@@ -4,7 +4,8 @@
 
 - **alt-vs-pypi** — сверка версий Python-пакетов в Sisyphus с PyPI;
 - **alt-branch-compare** — сравнение версий пакетов мейнтейнера между Sisyphus и стабильной веткой;
-- **alt-vendor-export** — выгрузка вендоров для Go, Rust, Ruby и Node.js проектов.
+- **alt-vendor-export** — выгрузка вендоров для Go, Rust, Ruby и Node.js проектов;
+- **alt-node-store** — выгрузка pnpm-хранилища (`.gear/pnpm-store.tar`) для офлайн-сборки frontend в hasher.
 
 ## Установка
 
@@ -167,6 +168,33 @@ cp -a * %buildroot/%nodejs_sitelib/%node_module/
 
 По политике в `node_modules` программы не должно быть нативных бинарников —
 такие зависимости оформляются отдельными пакетами `nodejs-<имя>`.
+
+### Выгрузка pnpm-хранилища (для сборки frontend в hasher)
+
+```bash
+alt-node-store /path/to/pnpm-project
+```
+
+Для пакетов, которые собирают frontend через `pnpm build` прямо в hasher
+(без сети), вместо `predownloaded-*` выгружается content-addressed store —
+весь каталог `pnpm store` упаковывается в `.gear/pnpm-store.tar`:
+
+- в spec хранилище распаковывается в `.pnpm-store/v11` и ставится с
+  `pnpm install --frozen-lockfile --ignore-scripts --offline`;
+- в `.gear/rules` тар копируется через `copy: .gear/pnpm-store.tar name=pnpm-store.tar`.
+
+Команда временно дописывает `supportedArchitectures` (`os=linux`,
+`cpu=x64,arm64,ia32`, `libc=glibc`) в `pnpm-workspace.yaml` и убирает
+`packageManager` из `package.json`, чтобы pnpm 11 не «самодаунгрейдился» на
+версию из этого поля; после выгрузки оба файла восстанавливаются. Так один
+тар, собранный на x86_64, содержит нативные биндинги и для arm64/i586
+(`@rolldown/binding-linux-arm64-gnu`, `@esbuild/linux-ia32`, …).
+
+Флаги:
+
+```bash
+alt-node-store . --cpu x64,arm64 --libc glibc --output .gear/pnpm-store.tar
+```
 
 ## Разработка
 

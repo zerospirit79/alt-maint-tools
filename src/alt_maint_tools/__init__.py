@@ -1,3 +1,3 @@
 """Utilities for ALT Linux package maintainers."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"

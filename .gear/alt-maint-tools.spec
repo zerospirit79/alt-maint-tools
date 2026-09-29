@@ -3,7 +3,7 @@
 %def_with check
 
 Name: alt-maint-tools
-Version: 0.1.4
+Version: 0.1.5
 Release: alt1
 Summary: Utilities for ALT Linux package maintainers
 Summary(ru_RU): Утилиты для мейнтейнеров пакетов ALT Linux
@@ -69,10 +69,14 @@ Python-пакетов с PyPI, сравнение версий между вет
 %_bindir/alt-vs-pypi
 %_bindir/alt-branch-compare
 %_bindir/alt-vendor-export
+%_bindir/alt-node-store
 %python3_sitelibdir/%mod_name/
 %python3_sitelibdir/%{pyproject_distinfo %mod_name}/
 
 %changelog
+* Mon Sep 29 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.5-alt1
+- Add alt-node-store: dump pnpm content-addressable store for offline hasher builds.
+
 * Wed Aug 05 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.4-alt1
 - Vendor export: vendor/ in-tree for Go/Rust/Ruby; Node.js in predownloaded-*/node_modules.
 - Prefer Node detection for pnpm monorepos with root Cargo.toml.
