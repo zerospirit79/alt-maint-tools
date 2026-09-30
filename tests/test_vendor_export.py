@@ -324,6 +324,142 @@ def test_vendor_node_bun_inplace(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("files", "package_json", "cli_major", "expected"),
+    [
+        ([".yarnrc.yml"], "{}", None, "berry"),
+        ([], '{"packageManager": "yarn@4.2.1+sha256.abc"}', None, "berry"),
+        ([], '{"packageManager": "yarn@1.22.22"}', None, "classic"),
+        ([], "{}", 1, "classic"),
+        ([], "{}", 4, "berry"),
+        ([], "{}", None, "classic"),
+    ],
+)
+def test_detect_yarn_generation(
+    tmp_path: Path,
+    files: list[str],
+    package_json: str,
+    cli_major: int | None,
+    expected: str,
+) -> None:
+    (tmp_path / "package.json").write_text(package_json, encoding="utf-8")
+    for name in files:
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    with patch.object(vendor_export, "_yarn_major_from_cli", return_value=cli_major):
+        assert vendor_export.detect_yarn_generation(tmp_path) == expected
+
+
+def test_node_install_command_yarn_berry() -> None:
+    """Yarn 2+ has no --frozen-lockfile/--ignore-scripts/--production flags."""
+    assert vendor_export._node_install_command(
+        "yarn", production=False, generation="berry"
+    ) == ["yarn", "install", "--immutable"]
+    assert vendor_export._node_install_command(
+        "yarn", production=True, generation="berry"
+    ) == ["yarn", "workspaces", "focus", "--production"]
+    # Yarn 1 keeps its own flags.
+    assert vendor_export._node_install_command("yarn", production=False) == [
+        "yarn",
+        "install",
+        "--frozen-lockfile",
+        "--ignore-scripts",
+    ]
+
+
+def test_yarn_berry_install_env() -> None:
+    assert vendor_export._yarn_install_env("classic") is None
+    berry_env = vendor_export._yarn_install_env("berry")
+    assert berry_env is not None
+    # The pinned yarn must be used (yarnPath): any other one rewrites the
+    # lockfile and --immutable fails.
+    assert "YARN_IGNORE_PATH" not in berry_env
+    assert berry_env["YARN_ENABLE_SCRIPTS"] == "false"
+    assert berry_env["YARN_NODE_LINKER"] == "node-modules"
+    # berry projects guard committed .pnp.* with immutablePatterns; the
+    # node-modules linker drops those files, so the guard has to go.
+    assert berry_env["YARN_IMMUTABLE_PATTERNS"] == "[]"
+
+
+def test_preserve_yarn_pnp_artifacts_restores_committed_files(tmp_path: Path) -> None:
+    (tmp_path / ".pnp.cjs").write_text("pnp", encoding="utf-8")
+    (tmp_path / ".pnp.loader.mjs").write_text("loader", encoding="utf-8")
+
+    with vendor_export._preserve_yarn_pnp_artifacts(tmp_path, "berry"):
+        (tmp_path / ".pnp.cjs").unlink()
+        (tmp_path / ".pnp.data.json").write_text("{}", encoding="utf-8")
+
+    assert (tmp_path / ".pnp.cjs").read_text(encoding="utf-8") == "pnp"
+    assert (tmp_path / ".pnp.loader.mjs").read_text(encoding="utf-8") == "loader"
+    # Artifacts the install invented are not left behind either.
+    assert not (tmp_path / ".pnp.data.json").exists()
+
+
+def test_preserve_yarn_pnp_artifacts_restores_on_failure(tmp_path: Path) -> None:
+    (tmp_path / ".pnp.cjs").write_text("pnp", encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        with vendor_export._preserve_yarn_pnp_artifacts(tmp_path, "berry"):
+            (tmp_path / ".pnp.cjs").unlink()
+            raise RuntimeError("install failed")
+
+    assert (tmp_path / ".pnp.cjs").read_text(encoding="utf-8") == "pnp"
+
+
+def test_prepare_node_workdir_copies_berry_config(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"name": "demo"}', encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+    (tmp_path / ".yarnrc.yml").write_text(
+        "nodeLinker: pnp\nyarnPath: scripts/run-yarn.js\ncatalog:\n  typescript: ^5.9.2\n",
+        encoding="utf-8",
+    )
+    patches = tmp_path / ".yarn" / "patches"
+    patches.mkdir(parents=True)
+    (patches / "got.patch").write_text("patch", encoding="utf-8")
+    cache = tmp_path / ".yarn" / "cache"
+    cache.mkdir()
+    (cache / "big.zip").write_text("x", encoding="utf-8")
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    vendor_export._prepare_node_workdir(tmp_path, work_dir, generation="berry")
+
+    config = (work_dir / ".yarnrc.yml").read_text(encoding="utf-8")
+    # yarnPath would point at sources that are not in the workdir.
+    assert "yarnPath" not in config
+    assert "catalog:" in config
+    assert (work_dir / "yarn.lock").is_file()
+    assert (work_dir / ".yarn" / "patches" / "got.patch").is_file()
+    # The in-tree cache is not copied (it is huge and re-fetchable).
+    assert not (work_dir / ".yarn" / "cache").exists()
+
+
+def test_vendor_node_yarn_berry_workspace(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name": "monorepo-root", "private": true, "workspaces": ["packages/*"]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "yarn.lock").write_text("__metadata:\n  version: 10\n", encoding="utf-8")
+    (tmp_path / ".yarnrc.yml").write_text("enableGlobalCache: false\n", encoding="utf-8")
+
+    def fake_run_command(args: list[str], *, cwd: Path, env=None) -> None:
+        assert args == ["yarn", "install", "--immutable"]
+        assert env is not None
+        assert env["YARN_ENABLE_SCRIPTS"] == "false"
+        assert env["YARN_NODE_LINKER"] == "node-modules"
+        (cwd / "node_modules" / "demo").mkdir(parents=True)
+        (cwd / "node_modules" / "demo" / "index.js").write_text("1", encoding="utf-8")
+
+    with patch.object(vendor_export.shutil, "which", return_value="/usr/bin/yarn"):
+        with patch.object(vendor_export, "run_command", side_effect=fake_run_command) as run_command:
+            vendor_export.vendor_node(tmp_path)
+
+    run_command.assert_called_once()
+    assert (
+        tmp_path / ".gear" / "predownloaded-production" / "node_modules" / "demo" / "index.js"
+    ).is_file()
+
+
 def test_main_help_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         vendor_export.main(["-h"])

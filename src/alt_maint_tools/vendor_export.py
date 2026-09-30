@@ -9,13 +9,20 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
 from alt_maint_tools import __version__
 
 ProjectType = Literal["go", "rust", "ruby", "node"]
 NodePackageManager = Literal["npm", "pnpm", "yarn", "bun"]
+YarnGeneration = Literal["classic", "berry"]
+
+# Yarn 1 flags; Yarn 2+ (berry) replaced them with config settings.
+_YARN_PACKAGE_MANAGER_RE = re.compile(r"^yarn@(\d+)(?:[.+-]|$)")
+# .yarn/ subtrees an offline-ish berry install needs next to the lockfile.
+_YARN_BERRY_VENDOR_DIRS = ("patches", "plugins", "releases")
 
 # Lines in .gitignore that would exclude node_modules from gear/hasher source trees.
 _NODE_MODULES_GITIGNORE_RE = re.compile(
@@ -264,6 +271,111 @@ def detect_node_package_manager(project_dir: Path) -> NodePackageManager:
     return "npm"
 
 
+def _yarn_major_from_package_json(project_dir: Path) -> int | None:
+    """Read the yarn major from ``packageManager: yarn@N``."""
+    package_json = project_dir / "package.json"
+    if not package_json.is_file():
+        return None
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    match = _YARN_PACKAGE_MANAGER_RE.match(str(data.get("packageManager") or ""))
+    return int(match.group(1)) if match else None
+
+
+def _yarn_major_from_cli(project_dir: Path) -> int | None:
+    """Ask the yarn binary itself; it may be a project-local build via yarnPath."""
+    try:
+        completed = subprocess.run(
+            ["yarn", "--version"],
+            cwd=project_dir,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.match(r"(\d+)", (completed.stdout or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def detect_yarn_generation(project_dir: Path) -> YarnGeneration:
+    """Tell Yarn 1 (classic) from Yarn 2+ (berry).
+
+    The two do not share install flags: classic has ``--frozen-lockfile`` and
+    ``--production``, berry replaced them with ``--immutable`` and
+    ``yarn workspaces focus``, and berry has no ``--ignore-scripts`` at all.
+    """
+    if (project_dir / ".yarnrc.yml").is_file():
+        return "berry"
+    for major in (
+        _yarn_major_from_package_json(project_dir),
+        _yarn_major_from_cli(project_dir),
+    ):
+        if major is not None:
+            return "berry" if major >= 2 else "classic"
+    return "classic"
+
+
+def _yarn_install_env(generation: YarnGeneration) -> dict[str, str] | None:
+    """Env for a berry install: no build scripts, node_modules linker.
+
+    A project ``yarnPath`` is deliberately *not* ignored: only the pinned yarn
+    reproduces the lockfile bit for bit, and ``--immutable`` fails with any
+    other one (a different yarn reorders patch hashes and metadata).
+    """
+    if generation != "berry":
+        return None
+    return {
+        **os.environ,
+        # berry has no --ignore-scripts; enableScripts is the setting.
+        "YARN_ENABLE_SCRIPTS": "false",
+        # berry defaults to Plug'n'Play, but the export layout is node_modules.
+        "YARN_NODE_LINKER": "node-modules",
+        # Switching the linker makes yarn drop the committed .pnp.* files,
+        # which berry projects guard with immutablePatterns (YN0064). The
+        # lockfile itself is still protected by --immutable.
+        "YARN_IMMUTABLE_PATTERNS": "[]",
+    }
+
+
+# PnP artifacts an install regenerates or removes when the linker changes.
+_YARN_PNP_ARTIFACTS = (
+    ".pnp.cjs",
+    ".pnp.cjs.d",
+    ".pnp.data.json",
+    ".pnp.loader.mjs",
+)
+
+
+@contextmanager
+def _preserve_yarn_pnp_artifacts(
+    project_dir: Path, generation: YarnGeneration
+) -> Iterator[None]:
+    """Restore the PnP files a node-modules install drops or rewrites.
+
+    Projects that commit ``.pnp.cjs`` (common in berry repos) must not be
+    left with a tree that its own ``yarn`` can no longer boot.
+    """
+    if generation != "berry":
+        yield
+        return
+    saved: dict[str, bytes] = {}
+    for name in _YARN_PNP_ARTIFACTS:
+        path = project_dir / name
+        if path.is_file():
+            saved[name] = path.read_bytes()
+    try:
+        yield
+    finally:
+        for name, data in saved.items():
+            (project_dir / name).write_bytes(data)
+        for name in _YARN_PNP_ARTIFACTS:
+            if name not in saved and (project_dir / name).exists():
+                (project_dir / name).unlink()
+
+
 def _is_node_workspace(project_dir: Path) -> bool:
     """Return True when install must run in the project tree (monorepo)."""
     if (project_dir / "pnpm-workspace.yaml").is_file():
@@ -322,7 +434,34 @@ def _deduplicate_system_node_modules(work_dir: Path) -> None:
                 entry.unlink(missing_ok=True)
 
 
-def _prepare_node_workdir(project_dir: Path, work_dir: Path) -> None:
+def _copy_yarn_berry_config(project_dir: Path, work_dir: Path) -> None:
+    """Copy the berry config a lockfile-only workdir cannot resolve without.
+
+    ``catalog:``, ``packageExtensions:``, ``supportedArchitectures:`` and
+    ``enableGlobalCache:`` all live in ``.yarnrc.yml``, and ``resolutions``
+    point at ``~/.yarn/patches`` (``~`` is the project root in berry).
+    """
+    yarnrc = project_dir / ".yarnrc.yml"
+    if not yarnrc.is_file():
+        return
+    # The workdir holds only package.json plus lockfiles, so a project-local
+    # yarnPath (often a source build of the CLI, e.g. scripts/run-yarn.js)
+    # cannot be resolved there — use the ambient berry instead.
+    lines = [
+        line
+        for line in yarnrc.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not re.match(r"\s*yarnPath\s*:", line)
+    ]
+    (work_dir / ".yarnrc.yml").write_text("".join(lines), encoding="utf-8")
+    for name in _YARN_BERRY_VENDOR_DIRS:
+        source = project_dir / ".yarn" / name
+        if source.is_dir():
+            shutil.copytree(source, work_dir / ".yarn" / name, symlinks=True)
+
+
+def _prepare_node_workdir(
+    project_dir: Path, work_dir: Path, *, generation: YarnGeneration = "classic"
+) -> None:
     shutil.copy2(project_dir / "package.json", work_dir / "package.json")
     for lock_name in (
         "package-lock.json",
@@ -335,12 +474,15 @@ def _prepare_node_workdir(project_dir: Path, work_dir: Path) -> None:
         lock_file = project_dir / lock_name
         if lock_file.is_file():
             shutil.copy2(lock_file, work_dir / lock_name)
+    if generation == "berry":
+        _copy_yarn_berry_config(project_dir, work_dir)
 
 
 def _node_install_command(
     package_manager: NodePackageManager,
     *,
     production: bool,
+    generation: YarnGeneration = "classic",
 ) -> list[str]:
     if package_manager == "npm":
         return ["npm", "install", "--omit=dev"] if production else ["npm", "install"]
@@ -349,6 +491,12 @@ def _node_install_command(
         base = ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"]
         return [*base, "--prod"] if production else base
     if package_manager == "yarn":
+        if generation == "berry":
+            # berry dropped --frozen-lockfile (--immutable) and has no
+            # --ignore-scripts; production deps come from workspace focus.
+            if production:
+                return ["yarn", "workspaces", "focus", "--production"]
+            return ["yarn", "install", "--immutable"]
         base = ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"]
         return [*base, "--production"] if production else base
     # bun
@@ -479,15 +627,20 @@ def _install_node_in_workdir(
     package_manager: NodePackageManager,
     *,
     production: bool,
+    generation: YarnGeneration = "classic",
     cleanup_dev_packages: bool = False,
     dedupe_system: bool = False,
 ) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_node_workdir(project_dir, work_dir)
-    run_command(
-        _node_install_command(package_manager, production=production),
-        cwd=work_dir,
-    )
+    _prepare_node_workdir(project_dir, work_dir, generation=generation)
+    with _preserve_yarn_pnp_artifacts(work_dir, generation):
+        run_command(
+            _node_install_command(
+                package_manager, production=production, generation=generation
+            ),
+            cwd=work_dir,
+            env=_yarn_install_env(generation) if package_manager == "yarn" else None,
+        )
     if cleanup_dev_packages and package_manager == "npm":
         _remove_dev_packages(work_dir)
     if dedupe_system:
@@ -518,6 +671,9 @@ def vendor_node(project_dir: Path, *, inplace: bool = False) -> None:
     """
     package_manager = detect_node_package_manager(project_dir)
     _require_node_package_manager(package_manager)
+    generation: YarnGeneration = (
+        detect_yarn_generation(project_dir) if package_manager == "yarn" else "classic"
+    )
 
     gear_dir = project_dir / ".gear"
     # Layout matches lav's packages: no package-name subdirectory.
@@ -538,10 +694,14 @@ def vendor_node(project_dir: Path, *, inplace: bool = False) -> None:
         # Wipe every nested node_modules — leftover trees with wrong ownership
         # cause EACCES during pnpm/bun link (e.g. .meta-updater/node_modules).
         _remove_all_node_modules(project_dir)
-        run_command(
-            _node_install_command(package_manager, production=False),
-            cwd=project_dir,
-        )
+        with _preserve_yarn_pnp_artifacts(project_dir, generation):
+            run_command(
+                _node_install_command(
+                    package_manager, production=False, generation=generation
+                ),
+                cwd=project_dir,
+                env=_yarn_install_env(generation) if package_manager == "yarn" else None,
+            )
         if not project_node_modules.is_dir():
             raise VendorExportError(
                 f"После установки не найден каталог node_modules в {project_dir}"
@@ -557,6 +717,7 @@ def vendor_node(project_dir: Path, *, inplace: bool = False) -> None:
                 dev_work,
                 package_manager,
                 production=False,
+                generation=generation,
                 cleanup_dev_packages=True,
             )
             _copy_node_modules(dev_modules, dev_target)
@@ -566,6 +727,7 @@ def vendor_node(project_dir: Path, *, inplace: bool = False) -> None:
                 prod_work,
                 package_manager,
                 production=True,
+                generation=generation,
                 dedupe_system=True,
             )
             _copy_node_modules(prod_modules, prod_target)

@@ -126,8 +126,31 @@ alt-vendor-export --inplace /path/to/program
 |---|---|
 | `bun.lock` / `bun.lockb` | `bun install` |
 | `pnpm-lock.yaml` / `pnpm-workspace.yaml` | `pnpm install --frozen-lockfile --ignore-scripts` |
-| `yarn.lock` | `yarn install --frozen-lockfile --ignore-scripts` |
+| `yarn.lock` (Yarn 1) | `yarn install --frozen-lockfile --ignore-scripts` |
+| `yarn.lock` + `.yarnrc.yml` (Yarn 2+, berry) | `yarn install --immutable` |
 | иначе | `npm install` |
+
+Yarn Berry (Yarn 2 и новее) не знает ни `--frozen-lockfile`, ни `--ignore-scripts`,
+ни `--production`, поэтому поколение определяется по `.yarnrc.yml`, полю
+`packageManager: yarn@N` в `package.json` или выводу `yarn --version`, и команда
+строится иначе:
+
+- `--frozen-lockfile` → `--immutable`;
+- production-зависимости → `yarn workspaces focus --production`
+  (нужен плагин `plugin-workspace-tools`);
+- скрипты сборки отключаются через окружение `YARN_ENABLE_SCRIPTS=false`,
+  а линкер принудительно переключается с PnP на `YARN_NODE_LINKER=node-modules`,
+  потому что раскладка вендоров — это `node_modules`;
+- `immutablePatterns` из `.yarnrc.yml` снимается (`YARN_IMMUTABLE_PATTERNS=[]`):
+  смена линкера заставляет yarn удалить закоммиченные `.pnp.*`, иначе установка
+  падает с `YN0064`, хотя сам lockfile всё равно защищён `--immutable`;
+- `yarnPath` не отключается: только закреплённая версия yarn воспроизводит
+  lockfile байт в байт, с любой другой `--immutable` не проходит;
+- файлы `.pnp.cjs` / `.pnp.loader.mjs` восстанавливаются после установки, чтобы
+  проект остался рабочим (закоммиченные PnP-файлы — часть исходного дерева);
+- во временный каталог копируются `.yarnrc.yml` (без `yarnPath` — в таком
+  каталоге нет исходников проекта) и `.yarn/{patches,plugins,releases}`,
+  на которые ссылаются `catalog:`, `packageExtensions:` и `resolutions`.
 
 **Режим по умолчанию** (модули `node-*`):
 
