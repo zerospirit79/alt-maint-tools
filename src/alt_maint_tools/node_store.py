@@ -235,9 +235,21 @@ def export_pnpm_store(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alt-node-store",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Выгрузка pnpm-хранилища (.gear/pnpm-store.tar) для офлайн-сборки "
             "frontend в hasher. Сохраняет нативные биндинги для x86_64/i586/aarch64."
+        ),
+        epilog=(
+            "Когда нужен alt-vendor-export вместо этой утилиты (или вместе с ней):\n"
+            "  В spec нет pnpm build / npm run build, node_modules только\n"
+            "  распаковываются в hasher  ->  alt-vendor-export: кладёт готовые\n"
+            "                                   .gear/predownloaded-*/node_modules\n"
+            "                                   (npm, pnpm, yarn 1 и 2+/berry, bun).\n"
+            "  В spec есть pnpm build / vite build, т.е. фронтенд собирается\n"
+            "  в hasher, где нет сети      ->  alt-node-store (эта утилита,\n"
+            "                                   только pnpm).\n"
+            "  Нужны и вендоры, и своя сборка -> обе команды, они независимы."
         ),
     )
     parser.add_argument("project_dir", help="Путь к каталогу pnpm-проекта")

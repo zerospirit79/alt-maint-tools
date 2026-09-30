@@ -460,6 +460,22 @@ def test_vendor_node_yarn_berry_workspace(tmp_path: Path) -> None:
     ).is_file()
 
 
+def test_help_cross_references_the_other_node_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    """-h of both Node tools must answer "which one do I need?"."""
+    from alt_maint_tools import node_store
+
+    for module, other_tool in (
+        (vendor_export, "alt-node-store"),
+        (node_store, "alt-vendor-export"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            module.main(["-h"])
+        captured = capsys.readouterr().out
+        assert exc.value.code == 0
+        assert other_tool in captured
+        assert "pnpm build" in captured
+
+
 def test_main_help_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         vendor_export.main(["-h"])

@@ -776,10 +776,20 @@ def export_vendors(project_dir: Path, *, inplace: bool = False) -> ProjectType:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alt-vendor-export",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Выгрузка вендоров для Go, Rust, Ruby или Node.js: "
             "vendor/ в дереве проекта (Go/Rust/Ruby) или "
             ".gear/predownloaded-*/node_modules (Node.js)."
+        ),
+        epilog=(
+            "Когда нужен alt-node-store вместо этой утилиты (или вместе с ней):\n"
+            "  В spec нет pnpm build / npm run build, node_modules только\n"
+            "  распаковываются в hasher  ->  alt-vendor-export (эта утилита).\n"
+            "  В spec есть pnpm build / vite build, т.е. фронтенд собирается\n"
+            "  в hasher, где нет сети      ->  alt-node-store (только pnpm),\n"
+            "                                   он кладёт .gear/pnpm-store.tar.\n"
+            "  Нужны и вендоры, и своя сборка -> обе команды, они независимы."
         ),
     )
     parser.add_argument("project_dir", help="Путь к каталогу проекта")

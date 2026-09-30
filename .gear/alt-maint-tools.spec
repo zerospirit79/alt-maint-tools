@@ -3,7 +3,7 @@
 %def_with check
 
 Name: alt-maint-tools
-Version: 0.1.6
+Version: 0.1.7
 Release: alt1
 Summary: Utilities for ALT Linux package maintainers
 Summary(ru_RU): Утилиты для мейнтейнеров пакетов ALT Linux
@@ -74,6 +74,10 @@ Python-пакетов с PyPI, сравнение версий между вет
 %python3_sitelibdir/%{pyproject_distinfo %mod_name}/
 
 %changelog
+* Wed Sep 30 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.7-alt1
+- Document when to run alt-vendor-export and when alt-node-store: a table in
+  README and a cross-reference in the -h output of both Node.js tools.
+
 * Wed Sep 30 2026 Pavel Shilov <zerospirit@altlinux.org> 0.1.6-alt1
 - alt-vendor-export: support Yarn 2+ (berry) — --immutable instead of
   --frozen-lockfile, yarn workspaces focus for production deps, no

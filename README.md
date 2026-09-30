@@ -25,6 +25,26 @@ apt-get install alt-maint-tools
 
 ## Использование
 
+### alt-vendor-export или alt-node-store?
+
+Для Node.js-пакетов есть две утилиты, и они не взаимозаменяемы — выбирайте по
+spec:
+
+| Что происходит в hasher | Что запускать | Что получаем |
+|---|---|---|
+| В spec нет `pnpm build` / `npm run build`: вендоры просто распаковываются из исходников | `alt-vendor-export` | `.gear/predownloaded-development/node_modules` и `.gear/predownloaded-production/node_modules` |
+| В spec есть `pnpm build` / `npm run build` / `vite build`: фронтенд собирается в hasher, где нет сети | `alt-node-store` (только pnpm) | `.gear/pnpm-store.tar` для `pnpm install --offline` |
+| Нужны и вендоры, и своя сборка | обе команды | команды независимы и не мешают друг другу |
+
+Короткий способ: откройте `%build` в spec. Есть `pnpm build` — нужна
+`alt-node-store`, нет — `alt-vendor-export`. Та же подсказка есть в `-h` обеих
+утилит.
+
+- `alt-vendor-export` умеет npm, pnpm, yarn (1 и 2+/berry) и bun, а для
+  Go/Rust/Ruby делает `vendor/`;
+- `alt-node-store` работает только с pnpm и существует именно потому, что в
+  hasher нет сети, а `pnpm install` приходится выполнять заново.
+
 ### Сверка с PyPI
 
 ```bash
